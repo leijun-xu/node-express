@@ -1,0 +1,22 @@
+
+# GET http://localhost:3000/users HTTP/1.1;
+
+# POST http://localhost:3000/users/create HTTP/1.1;
+# Content-Type: application/json
+
+# {
+#   "name": "leijxu2",
+#   "email": "leijxu2.doe@example.com"
+# }
+
+# GET http://localhost:3000/users/1 HTTP/1.1;
+
+# PUT http://localhost:3000/users/1 HTTP/1.1;
+# Content-Type: application/json
+
+# {
+#   "name": "leijxu-updated",
+#   "email": "leijxu.updated@example.com"
+# }
+
+DELETE http://localhost:3000/users/3 HTTP/1.1;
