@@ -1,0 +1,5 @@
+# QQ邮箱配置
+# 注意：pass 应该是QQ邮箱的授权码，不是登录密码
+# 获取授权码：登录QQ邮箱 -> 设置 -> 账户 -> POP3/IMAP/SMTP/Exchange/CardDAV/CalDAV服务 -> 开启POP3/SMTP服务 -> 生成授权码
+user: xxx@qq.com
+pass: xxxx  # 这里应该是授权码

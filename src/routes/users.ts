@@ -1,5 +1,8 @@
 import { PrismaClient } from '@prisma/client';
 import express from 'express';
+import fs from "node:fs";
+import yaml from "js-yaml";
+import nodemailer from "nodemailer";
 
 const prisma = new PrismaClient();
 const router = express.Router();
@@ -18,7 +21,7 @@ router.get('/', async (req, res) => {
 // POST /users - 创建新用户
 router.post('/create', async (req, res) => {
   const { name, email } = req.body;
-  const data = await prisma.user.create({
+  await prisma.user.create({
     data: {
       name,
       email,
@@ -36,8 +39,57 @@ router.post('/create', async (req, res) => {
       // }
     }
   });
-  // 这里可以保存到数据库
-  res.send(data);
+  // send email
+  const emailConfig = yaml.load(fs.readFileSync("email.yaml", "utf-8")) as { user: string; pass: string };
+
+  const transporter = nodemailer.createTransport({
+    service: "qq",
+    host: "smtp.qq.com",
+    port: 465,
+    secure: true,
+    auth: {
+      user: emailConfig.user,
+      pass: emailConfig.pass, // QQ邮箱需要使用授权码，不是登录密码
+    },
+  });
+
+  try {
+    // 验证连接
+    await transporter.verify();
+    console.log("SMTP服务器连接成功");
+
+    const info = await transporter.sendMail({
+      from: `"系统通知" <${emailConfig.user}>`,
+      to: email,
+      subject: "欢迎注册",
+      text: `你好 ${name}，欢迎注册我们的服务！`,
+      html: `<h1>欢迎注册</h1><p>你好 ${name}，欢迎注册我们的服务！</p>`,
+    });
+
+    console.log("邮件发送成功:", info.messageId);
+    res.send('邮件发送成功');
+  } catch (error) {
+    console.error("邮件发送失败:", error);
+    res.status(500).send('邮件发送失败');
+  }
+
+
+  // let data2 = ''
+  // req.on('data', chunk => {
+  //   data2 += chunk;
+  // });
+
+  // req.on('end', () => {
+  //   const { to } = JSON.parse(data2);
+  //   transporter.sendMail({
+  //     from: emailConfig.user,
+  //     to,
+  //     subject: "欢迎注册",
+  //     text: `你好 ${name}，欢迎注册我们的服务！`,
+  //   });
+  //   // 这里可以保存到数据库
+  //   res.send('ok');
+  // })
 });
 
 // PUT /users/:id - 更新特定用户
