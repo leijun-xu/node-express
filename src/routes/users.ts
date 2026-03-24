@@ -1,141 +1,182 @@
 import { PrismaClient } from '@prisma/client';
 import express from 'express';
-import fs from "node:fs";
-import yaml from "js-yaml";
-import nodemailer from "nodemailer";
+import { logger } from '../utils/logger.js';
 
 const prisma = new PrismaClient();
 const router = express.Router();
 
-// GET /users - 获取所有用户
+// GET /users - 获取所有用户（排除密码）
 router.get('/', async (req, res) => {
-  const data = await prisma.user.findMany({
-    include: {
-      // posts: true, // 包含用户的文章
-    },
-  });
-  // 这里可以从数据库获取用户数据
-  res.send(data);
+  try {
+    const users = await prisma.user.findMany({
+      select: {
+        id: true,
+        email: true,
+        firstName: true,
+        lastName: true
+      }
+    });
+    logger.info('获取用户列表成功');
+    res.json({
+      code: 200,
+      message: '获取用户列表成功',
+      data: users
+    });
+  } catch (error) {
+    logger.error(`获取用户列表异常: ${error}`);
+    res.status(500).json({
+      code: 500,
+      message: '获取用户列表失败',
+      data: null
+    });
+  }
 });
 
-// POST /users - 创建新用户
-router.post('/create', async (req, res) => {
-  const { name, email } = req.body;
-  await prisma.user.create({
-    data: {
-      name,
-      email,
-      // posts: {
-      //   create: [
-      //     {
-      //       title: "第一篇文章",
-      //       content: "这是第一篇文章的内容",
-      //     },
-      //     {
-      //       title: "第二篇文章",
-      //       content: "这是第二篇文章的内容",
-      //     }
-      //   ]
-      // }
-    }
-  });
-  // send email
-  const emailConfig = yaml.load(fs.readFileSync("email.yaml", "utf-8")) as { user: string; pass: string };
-
-  const transporter = nodemailer.createTransport({
-    service: "qq",
-    host: "smtp.qq.com",
-    port: 465,
-    secure: true,
-    auth: {
-      user: emailConfig.user,
-      pass: emailConfig.pass, // QQ邮箱需要使用授权码，不是登录密码
-    },
-  });
-
+// PUT /users/:id - 更新特定用户（支持更新所有字段）
+router.put('/:id', async (req, res) => {
   try {
-    // 验证连接
-    await transporter.verify();
-    console.log("SMTP服务器连接成功");
+    const { id } = req.params;
+    const { email, firstName, lastName } = req.body;
 
-    const info = await transporter.sendMail({
-      from: `"系统通知" <${emailConfig.user}>`,
-      to: email,
-      subject: "欢迎注册",
-      text: `你好 ${name}，欢迎注册我们的服务！`,
-      html: `<h1>欢迎注册</h1><p>你好 ${name}，欢迎注册我们的服务！</p>`,
+    // 验证输入
+    if (!email) {
+      logger.warn(`更新用户失败 - 邮箱为空 - userId: ${id}`);
+      return res.status(400).json({
+        code: 400,
+        message: '邮箱不能为空',
+        data: null
+      });
+    }
+
+    // 检查邮箱是否已被其他用户使用
+    const existingUser = await prisma.user.findFirst({
+      where: {
+        email,
+        NOT: { id: Number(id) }
+      }
     });
 
-    console.log("邮件发送成功:", info.messageId);
-    res.send('邮件发送成功');
+    if (existingUser) {
+      logger.warn(`更新用户失败 - 邮箱已被使用 - email: ${email}`);
+      return res.status(400).json({
+        code: 400,
+        message: '邮箱已被使用',
+        data: null
+      });
+    }
+
+    const updatedUser = await prisma.user.update({
+      where: { id: Number(id) },
+      data: {
+        email,
+        firstName,
+        lastName
+      },
+      select: {
+        id: true,
+        email: true,
+        firstName: true,
+        lastName: true
+      }
+    });
+
+    logger.info(`用户更新成功 - userId: ${id} - email: ${email}`);
+    res.json({
+      code: 200,
+      message: '用户更新成功',
+      data: updatedUser
+    });
   } catch (error) {
-    console.error("邮件发送失败:", error);
-    res.status(500).send('邮件发送失败');
+    logger.error(`更新用户异常: ${error}`);
+    if (error.code === 'P2025') {
+      return res.status(404).json({
+        code: 404,
+        message: '用户不存在',
+        data: null
+      });
+    }
+    res.status(500).json({
+      code: 500,
+      message: '更新用户失败',
+      data: null
+    });
   }
-
-
-  // let data2 = ''
-  // req.on('data', chunk => {
-  //   data2 += chunk;
-  // });
-
-  // req.on('end', () => {
-  //   const { to } = JSON.parse(data2);
-  //   transporter.sendMail({
-  //     from: emailConfig.user,
-  //     to,
-  //     subject: "欢迎注册",
-  //     text: `你好 ${name}，欢迎注册我们的服务！`,
-  //   });
-  //   // 这里可以保存到数据库
-  //   res.send('ok');
-  // })
 });
 
-// PUT /users/:id - 更新特定用户
-router.put('/:id', async (req, res) => {
-  const { id } = req.params;
-  const { name, email } = req.body;
-  const data = await prisma.user.update({
-    where: { id: Number(id) },
-    data: {
-      name,
-      email,
-    },
-  });
-  res.send(data);
-});
-
-// GET /users/:id - 获取特定用户
+// GET /users/:id - 获取特定用户（排除密码）
 router.get('/:id', async (req, res) => {
-  const { id } = req.params;
-  const data = await prisma.user.findUnique({
-    where: { id: Number(id) },
-    // include: {  posts: true }, // 包含用户的文章
-  });
-  // 这里可以从数据库获取特定用户
-  res.send(data);
+  try {
+    const { id } = req.params;
+    const user = await prisma.user.findUnique({
+      where: { id: Number(id) },
+      select: {
+        id: true,
+        email: true,
+        firstName: true,
+        lastName: true
+      }
+    });
+
+    if (!user) {
+      logger.warn(`获取用户失败 - 用户不存在 - userId: ${id}`);
+      return res.status(404).json({
+        code: 404,
+        message: '用户不存在',
+        data: null
+      });
+    }
+
+    logger.info(`获取用户成功 - userId: ${id}`);
+    res.json({
+      code: 200,
+      message: '获取用户成功',
+      data: user
+    });
+  } catch (error) {
+    logger.error(`获取用户异常: ${error}`);
+    res.status(500).json({
+      code: 500,
+      message: '获取用户失败',
+      data: null
+    });
+  }
 });
 
 // DELETE /users/:id - 删除特定用户
 router.delete('/:id', async (req, res) => {
   try {
     const { id } = req.params;
-    const data = await prisma.user.delete({
+    const deletedUser = await prisma.user.delete({
       where: { id: Number(id) },
+      select: {
+        id: true,
+        email: true,
+        firstName: true,
+        lastName: true
+      }
     });
 
+    logger.info(`用户删除成功 - userId: ${id}`);
     res.json({
+      code: 200,
       message: '用户删除成功',
-      deletedUser: data
+      data: deletedUser
     });
   } catch (error) {
-    console.error('删除用户失败:', error);
+    logger.error(`删除用户异常: ${error}`);
+    if (error.code === 'P2025') {
+      return res.status(404).json({
+        code: 404,
+        message: '用户不存在',
+        data: null
+      });
+    }
     res.status(500).json({
+      code: 500,
       message: '删除用户失败',
+      data: null
     });
   }
 });
-
 
 export default router;

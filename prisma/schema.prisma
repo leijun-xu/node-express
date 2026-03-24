@@ -14,18 +14,20 @@ datasource db {
 // 编写表结构
 
 // 文章表
-model Post {
-  id       Int    @id @default(autoincrement()) // id 自增
-  title    String
-  content  String
-  author   User   @relation(fields: [authorId], references: [id])
-  authorId Int // 关联id 
-}
+// model Post {
+//   id       Int    @id @default(autoincrement()) // id 自增
+//   title    String
+//   content  String
+//   author   User   @relation(fields: [authorId], references: [id])
+//   authorId Int // 关联id 
+// }
 
 // 用户表
 model User {
-  id    Int    @id @default(autoincrement()) // id 自增
-  name  String
-  email String @unique // 唯一
-  posts Post[] // 一对多的关系
+  id        Int    @id @default(autoincrement()) // id 自增
+  email     String @unique // 唯一
+  firstName String
+  lastName  String
+  password  String
+  // posts Post[] // 一对多的关系
 }
