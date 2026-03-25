@@ -88,13 +88,6 @@ router.put('/:id', async (req, res) => {
     });
   } catch (error) {
     logger.error(`更新用户异常: ${error}`);
-    if (error.code === 'P2025') {
-      return res.status(404).json({
-        code: 404,
-        message: '用户不存在',
-        data: null
-      });
-    }
     res.status(500).json({
       code: 500,
       message: '更新用户失败',
@@ -164,13 +157,6 @@ router.delete('/:id', async (req, res) => {
     });
   } catch (error) {
     logger.error(`删除用户异常: ${error}`);
-    if (error.code === 'P2025') {
-      return res.status(404).json({
-        code: 404,
-        message: '用户不存在',
-        data: null
-      });
-    }
     res.status(500).json({
       code: 500,
       message: '删除用户失败',
