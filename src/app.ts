@@ -8,12 +8,6 @@ import { PrismaClient } from "@prisma/client";
 import { verifyToken } from "./middleware/auth.js";
 import { logger } from "./utils/logger.js";
 import { sendWelcomeEmail } from "./services/emailService.js";
-import rateLimit from "express-rate-limit";
-
-const loginLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15分钟
-  max: 5, // 最多5次
-});
 
 const prisma = new PrismaClient();
 const secretKey = process.env.SECRET_KEY!; // 这个密钥应该保存在环境变量中
@@ -53,7 +47,7 @@ app.get("/health", (req, res) => {
 });
 
 // login路由（无需认证）
-app.post("/api/login", loginLimiter, async (req, res) => {
+app.post("/api/login", async (req, res) => {
   try {
     const { email, password } = req.body;
 

@@ -1,5 +1,5 @@
 import express from "express";
-import { logger } from "@/utils/logger.js";
+import { logger } from "../utils/logger.js";
 import fs from "fs/promises";
 import path from "path";
 import crypto from "crypto";
@@ -403,7 +403,10 @@ router.get("/download/:fileId", async (req, res) => {
 
     // 处理中文文件名编码
     const encodedFileName = encodeURIComponent(fileId);
-    res.setHeader("Content-Disposition", `attachment; filename="${encodedFileName}"; filename*=UTF-8''${encodedFileName}`);
+    res.setHeader(
+      "Content-Disposition",
+      `attachment; filename="${encodedFileName}"; filename*=UTF-8''${encodedFileName}`,
+    );
     res.setHeader("Content-Type", "application/octet-stream");
     res.send(file);
   } catch (error) {
