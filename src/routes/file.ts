@@ -143,11 +143,11 @@ router.post("/upload", upload.single("file"), async (req: any, res) => {
       allUploaded,
       fileId,
     });
-    if (allUploaded) {
-      logger.info(`所有分片上传完成 - fileId: ${fileId}`);
-      // 自动触发合并（异步执行，不阻塞响应）
-      mergeChunks(fileId).catch((err) => logger.error(`自动合并失败: ${err}`));
-    }
+    // if (allUploaded) {
+    //   logger.info(`所有分片上传完成 - fileId: ${fileId}`);
+    //   // 自动触发合并（异步执行，不阻塞响应）
+    //   mergeChunks(fileId).catch((err) => logger.error(`自动合并失败: ${err}`));
+    // }
   } catch (error) {
     logger.error(`分片上传失败: ${error}`);
     sendResponse(res, 500, "分片上传失败", error);
@@ -325,6 +325,90 @@ router.get("/verify", async (req, res) => {
   } catch (error) {
     logger.error(`文件验证失败: ${error}`);
     sendResponse(res, 500, "文件验证失败", error);
+  }
+});
+/**
+ * 获取文件
+ * GET /api/file/list
+ * Query: 无
+ * 从uploads/files目录读取已上传的文件列表并返回给前端
+ */
+router.get("/list", async (req, res) => {
+  try {
+    const files = await fs.readdir(UPLOAD_DIR);
+    const fileList = [];
+    for (const file of files) {
+      const filePath = path.join(UPLOAD_DIR, file);
+      const stats = await fs.stat(filePath);
+      fileList.push({
+        fileName: file,
+        id: stats.gid, // 这里使用文件名作为ID，实际应用中可能需要更复杂的ID生成策略
+        fileSize: stats.size,
+        uploadTime: stats.birthtime,
+      });
+    }
+    sendResponse(res, 200, "查询成功", [...fileList]);
+  } catch (error) {
+    logger.error(`获取文件列表失败: ${error}`);
+    sendResponse(res, 500, "获取文件列表失败", error);
+  }
+});
+
+/**
+ * 删除文件
+ * DELETE /api/file/delete?fileId=xxx
+ * 从uploads/files目录删除指定文件
+ */
+router.delete("/delete/:fileId", async (req, res) => {
+  try {
+    const { fileId } = req.params;
+
+    if (!fileId || typeof fileId !== "string") {
+      return sendResponse(res, 400, "缺少fileId参数");
+    }
+
+    const filePath = path.join(UPLOAD_DIR, fileId);
+
+    try {
+      await fs.unlink(filePath);
+      logger.info(`文件删除成功 - fileId: ${fileId}`);
+      sendResponse(res, 200, "文件删除成功");
+    } catch (err) {
+      logger.error(`文件删除失败 - fileId: ${fileId}, 错误: ${err}`);
+      sendResponse(res, 500, "文件删除失败", err);
+    }
+  } catch (error) {
+    logger.error(`删除文件失败: ${error}`);
+    sendResponse(res, 500, "删除文件失败", error);
+  }
+});
+
+/**
+ * 下载文件
+ * GET /api/file/download?fileId=xxx
+ * 从uploads/files目录读取指定文件并以blob流的形式返回给前端
+ * 注意：实际应用中需要添加权限验证等安全措施
+ */
+
+router.get("/download/:fileId", async (req, res) => {
+  try {
+    const { fileId } = req.params;
+    if (!fileId || typeof fileId !== "string") {
+      return sendResponse(res, 400, "缺少fileId参数");
+    }
+
+    const filePath = path.join(UPLOAD_DIR, fileId);
+    // blob流下载文件
+    const file = await fs.readFile(filePath);
+
+    // 处理中文文件名编码
+    const encodedFileName = encodeURIComponent(fileId);
+    res.setHeader("Content-Disposition", `attachment; filename="${encodedFileName}"; filename*=UTF-8''${encodedFileName}`);
+    res.setHeader("Content-Type", "application/octet-stream");
+    res.send(file);
+  } catch (error) {
+    logger.error(`下载文件失败: ${error}`);
+    sendResponse(res, 500, "下载文件失败", error);
   }
 });
 
