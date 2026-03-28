@@ -38,11 +38,20 @@ app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true, limit: "1mb" }));
 app.use(cors());
 
+// 可能存在的缓存配置
+app.use((req, res, next) => {
+  // 设置响应头禁止缓存
+  res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
+  res.setHeader("Pragma", "no-cache");
+  res.setHeader("Expires", "0");
+  next();
+});
 // 根路由
 app.get("/health", (req, res) => {
   sendResponse(res, 200, "API 服务运行正常", {
     version: "1.0.0",
     description: "Node.js + Express + Prisma 用户管理系统",
+    timestamp: Date.now(),
   });
 });
 

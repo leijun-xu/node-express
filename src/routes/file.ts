@@ -24,10 +24,14 @@ const upload = multer({
   },
 });
 
+// 根据环境变量或构建目录确定上传路径
+const isDevelopment = process.env.NODE_ENV !== "production";
+const basePath = process.cwd(); // 项目根目录
+
 // 临时分片存储目录
-const CHUNKS_DIR = path.join(process.cwd(), "uploads", "chunks");
+const CHUNKS_DIR = path.join(basePath, "uploads", "chunks");
 // 最终文件存储目录
-const UPLOAD_DIR = path.join(process.cwd(), "uploads", "files");
+const UPLOAD_DIR = path.join(basePath, "uploads", "files");
 
 // 确保目录存在
 async function ensureDirs() {
@@ -347,7 +351,7 @@ router.get("/list", async (req, res) => {
         uploadTime: stats.birthtime,
       });
     }
-    sendResponse(res, 200, "查询成功", [...fileList]);
+    sendResponse(res, 200, "查询成功" + basePath, [...fileList]);
   } catch (error) {
     logger.error(`获取文件列表失败: ${error}`);
     sendResponse(res, 500, "获取文件列表失败", error);
