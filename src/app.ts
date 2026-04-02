@@ -29,7 +29,7 @@ const sendResponse = (
 };
 
 // 确保 SECRET_KEY 已设置
-if (!secretKey) {
+if (!secretKey || secretKey === "") {
   throw new Error("SECRET_KEY environment variable is not set");
 }
 

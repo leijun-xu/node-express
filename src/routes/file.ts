@@ -24,8 +24,10 @@ const upload = multer({
   },
 });
 
+// 合并锁,防止同一文件并发合并
+const mergeLocks = new Map<string, Promise<any>>();
+
 // 根据环境变量或构建目录确定上传路径
-const isDevelopment = process.env.NODE_ENV !== "production";
 const basePath = process.cwd(); // 项目根目录
 
 // 临时分片存储目录
@@ -41,7 +43,6 @@ async function ensureDirs() {
 
 // 初始化目录
 ensureDirs();
-
 // 响应格式化工具
 const sendResponse = (
   res: any,
@@ -70,9 +71,27 @@ const sendResponse = (
 router.post("/upload", upload.single("file"), async (req: any, res) => {
   try {
     // 这里前端传过来的是formdata格式，使用multer中间件解析后，文件会在req.file中，其他字段在req.body中，所以我们需要从req.body中获取chunkIndex、totalChunks、fileId、fileName、fileSize等参数
+    logger.info(`收到上传请求 - Content-Type: ${req.get("Content-Type")}`);
+    logger.info(`req.body: ${JSON.stringify(req.body)}`);
+    logger.info(
+      `req.file: ${
+        !!req.file
+          ? JSON.stringify({
+              originalname: req.file.originalname,
+              size: req.file.size,
+              mimetype: req.file.mimetype,
+            })
+          : "null"
+      }`,
+    );
+
     const { chunkIndex, totalChunks, fileId, fileName, fileSize } =
       req.body || {};
     const file = req.file;
+
+    logger.info(
+      `解析参数 - chunkIndex: ${chunkIndex}, totalChunks: ${totalChunks}, fileId: ${fileId}, fileName: ${fileName}, fileSize: ${fileSize}`,
+    );
 
     // 参数校验
     if (
@@ -89,6 +108,7 @@ router.post("/upload", upload.single("file"), async (req: any, res) => {
         fileId,
         fileName,
         fileSize,
+        bodyKeys: Object.keys(req.body || {}),
       });
       return sendResponse(res, 400, "缺少必要参数");
     }
@@ -103,40 +123,115 @@ router.post("/upload", upload.single("file"), async (req: any, res) => {
     }
 
     logger.info(
-      `上传分片 - fileId: ${fileId}, chunk: ${chunkIndex + 1}/${totalChunks}, size: ${file.size}`,
+      `上传分片 - fileId: ${fileId}, chunk: ${parseInt(chunkIndex) + 1}/${parseInt(totalChunks)}, size: ${file.size}`,
     );
+
+    // 验证文件缓冲区是否存在
+    if (!file.buffer || file.buffer.length === 0) {
+      logger.error(
+        `文件缓冲区为空 - fileId: ${fileId}, chunkIndex: ${chunkIndex}`,
+      );
+      throw new Error("文件缓冲区为空，可能是multer配置问题");
+    }
 
     // 创建文件专属目录
     const fileDir = path.join(CHUNKS_DIR, fileId);
+    logger.info(`创建目录: ${fileDir}`);
     await fs.mkdir(fileDir, { recursive: true });
 
     // 保存分片文件
     const chunkPath = path.join(fileDir, `chunk-${chunkIndex}`);
+    logger.info(`保存分片: ${chunkPath}, 大小: ${file.buffer.length} bytes`);
+
     await fs.writeFile(chunkPath, file.buffer);
+    logger.info(`分片保存成功: ${chunkPath}`);
 
     logger.info(`分片保存成功 - ${chunkPath}`);
 
-    // 保存文件元数据
+    // 保存文件元数据（使用重试机制和原子写入防止并发问题）
     const metaPath = path.join(fileDir, "meta.json");
-    const meta = {
+    const parsedChunkIndex = parseInt(chunkIndex);
+
+    let retryCount = 0;
+    const maxRetries = 3;
+    let meta = {
       fileId,
       fileName,
       fileSize,
       totalChunks,
-      uploadedChunks: [parseInt(chunkIndex)],
+      uploadedChunks: [parsedChunkIndex],
     };
 
-    // 如果元数据已存在，更新已上传的分片列表
-    try {
-      const existingMeta = JSON.parse(await fs.readFile(metaPath, "utf-8"));
-      meta.uploadedChunks = [
-        ...new Set([...existingMeta.uploadedChunks, parseInt(chunkIndex)]),
-      ].sort((a, b) => a - b);
-    } catch (err) {
-      // 元数据文件不存在，使用新创建的
+    // 原子写入函数：使用临时文件+重命名
+    async function atomicWrite(filePath: string, content: string) {
+      const tempPath = `${filePath}.tmp`;
+      await fs.writeFile(tempPath, content);
+      await fs.rename(tempPath, filePath);
     }
 
-    await fs.writeFile(metaPath, JSON.stringify(meta, null, 2));
+    // 如果元数据已存在，更新已上传的分片列表
+    while (retryCount < maxRetries) {
+      try {
+        // 先检查元数据文件是否存在
+        try {
+          await fs.access(metaPath);
+          // 文件存在，读取并更新
+          const existingMetaContent = await fs.readFile(metaPath, "utf-8");
+          const existingMeta = JSON.parse(existingMetaContent);
+
+          logger.info(
+            `读取现有元数据成功 - fileId: ${fileId}, 已上传分片: ${existingMeta.uploadedChunks.join(", ")}`,
+          );
+
+          // 合并已上传的分片列表
+          const allChunks = new Set([
+            ...existingMeta.uploadedChunks,
+            parsedChunkIndex,
+          ]);
+          meta.uploadedChunks = Array.from(allChunks).sort((a, b) => a - b);
+
+          logger.info(
+            `更新元数据 - fileId: ${fileId}, 新分片: ${parsedChunkIndex}, 总分片数: ${meta.uploadedChunks.length}`,
+          );
+
+          // 使用原子写入更新元数据
+          await atomicWrite(metaPath, JSON.stringify(meta, null, 2));
+
+          logger.info(
+            `元数据更新成功 - fileId: ${fileId}, uploadedChunks: ${meta.uploadedChunks.join(", ")}`,
+          );
+        } catch (accessErr) {
+          // 文件不存在，这是第一次上传，直接写入新的元数据
+          const error = accessErr as any;
+          if (error.code === "ENOENT") {
+            logger.info(`元数据文件不存在，创建新文件 - fileId: ${fileId}`);
+            await atomicWrite(metaPath, JSON.stringify(meta, null, 2));
+            logger.info(
+              `元数据创建成功 - fileId: ${fileId}, uploadedChunks: ${meta.uploadedChunks.join(", ")}`,
+            );
+          } else {
+            throw accessErr;
+          }
+        }
+
+        break; // 成功，退出重试循环
+      } catch (err) {
+        retryCount++;
+        logger.warn(
+          `元数据文件操作失败，重试 ${retryCount}/${maxRetries} - fileId: ${fileId}, error: ${err}`,
+        );
+
+        if (retryCount >= maxRetries) {
+          logger.error(
+            `元数据文件操作失败，达到最大重试次数 - fileId: ${fileId}, error: ${err}`,
+          );
+          throw new Error(`更新元数据失败: ${err}`);
+        }
+
+        // 短暂延迟后重试
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+    }
 
     // 检查是否所有分片都已上传
     const allUploaded = meta.uploadedChunks.length === parseInt(totalChunks);
@@ -147,16 +242,62 @@ router.post("/upload", upload.single("file"), async (req: any, res) => {
       allUploaded,
       fileId,
     });
-    // if (allUploaded) {
-    //   logger.info(`所有分片上传完成 - fileId: ${fileId}`);
-    //   // 自动触发合并（异步执行，不阻塞响应）
-    //   mergeChunks(fileId).catch((err) => logger.error(`自动合并失败: ${err}`));
-    // }
+
+    // 当所有分片上传完成时，自动触发合并（异步执行，不阻塞响应）
+    if (allUploaded) {
+      logger.info(`所有分片上传完成 - fileId: ${fileId}，开始自动合并`);
+      // 异步合并，不阻塞当前响应
+      mergeChunksWithLock(fileId)
+        .then((result) => {
+          logger.info(
+            `自动合并成功 - fileId: ${fileId}, fileName: ${result.fileName}`,
+          );
+        })
+        .catch((err) => {
+          logger.error(`自动合并失败 - fileId: ${fileId}, 错误: ${err}`);
+        });
+    }
   } catch (error) {
-    logger.error(`分片上传失败: ${error}`);
-    sendResponse(res, 500, "分片上传失败", error);
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    const errorStack = error instanceof Error ? error.stack : "No stack trace";
+
+    logger.error(
+      `分片上传失败 - fileId: ${req.body?.fileId}, chunkIndex: ${req.body?.chunkIndex}, 错误: ${errorMessage}`,
+    );
+    logger.error(`错误堆栈: ${errorStack}`);
+
+    sendResponse(res, 500, "分片上传失败", {
+      error: errorMessage,
+      fileId: req.body?.fileId,
+      chunkIndex: req.body?.chunkIndex,
+    });
   }
 });
+
+/**
+ * 带锁的合并函数，防止并发合并
+ * @param fileId - 文件唯一标识
+ * @returns 合并后的文件信息
+ */
+async function mergeChunksWithLock(fileId: string) {
+  // 检查是否已有正在进行的合并
+  if (mergeLocks.has(fileId)) {
+    logger.info(`文件 ${fileId} 正在合并中，跳过本次合并请求`);
+    return mergeLocks.get(fileId);
+  }
+
+  // 创建合并任务
+  const mergePromise = mergeChunks(fileId).finally(() => {
+    // 无论成功或失败，都要释放锁
+    mergeLocks.delete(fileId);
+    logger.info(`合并锁已释放 - fileId: ${fileId}`);
+  });
+
+  // 将合并任务加入锁
+  mergeLocks.set(fileId, mergePromise);
+
+  return mergePromise;
+}
 
 /**
  * 合并分片的函数（可被自动调用或手动调用）
@@ -166,47 +307,115 @@ router.post("/upload", upload.single("file"), async (req: any, res) => {
 async function mergeChunks(fileId: string) {
   const fileDir = path.join(CHUNKS_DIR, fileId);
   const metaPath = path.join(fileDir, "meta.json");
+  let finalPath = "";
 
-  // 读取文件元数据
-  const metaContent = await fs.readFile(metaPath, "utf-8");
-  const meta = JSON.parse(metaContent);
+  try {
+    // 读取文件元数据
+    const metaContent = await fs.readFile(metaPath, "utf-8");
+    const meta = JSON.parse(metaContent);
 
-  logger.info(`开始合并文件 - fileId: ${fileId}, fileName: ${meta.fileName}`);
+    logger.info(
+      `开始合并文件 - fileId: ${fileId}, fileName: ${meta.fileName}, 已上传: ${meta.uploadedChunks.length}/${meta.totalChunks}`,
+    );
 
-  // 验证所有分片是否都已上传
-  if (meta.uploadedChunks.length !== parseInt(meta.totalChunks)) {
-    throw new Error("分片不完整，无法合并");
+    // 验证所有分片是否都已上传
+    const totalChunks = parseInt(meta.totalChunks);
+    if (meta.uploadedChunks.length !== totalChunks) {
+      throw new Error(
+        `分片不完整，无法合并。已上传: ${meta.uploadedChunks.length}/${totalChunks}`,
+      );
+    }
+
+    // 验证分片索引的完整性（0 到 totalChunks-1 都必须存在）
+    const missingChunks = [];
+    for (let i = 0; i < totalChunks; i++) {
+      if (!meta.uploadedChunks.includes(i)) {
+        missingChunks.push(i);
+      }
+    }
+
+    if (missingChunks.length > 0) {
+      throw new Error(`缺少分片: ${missingChunks.join(", ")}`);
+    }
+
+    // 创建最终文件
+    const finalFileName = `${Date.now()}-${meta.fileName}`;
+    finalPath = path.join(UPLOAD_DIR, finalFileName);
+
+    logger.info(`开始合并 ${totalChunks} 个分片到 ${finalPath}`);
+
+    // 按顺序合并分片
+    for (let i = 0; i < totalChunks; i++) {
+      const chunkPath = path.join(fileDir, `chunk-${i}`);
+
+      // 检查分片文件是否存在
+      try {
+        await fs.access(chunkPath);
+      } catch (err) {
+        throw new Error(`分片文件不存在: chunk-${i}`);
+      }
+
+      const chunkData = await fs.readFile(chunkPath);
+      await fs.appendFile(finalPath, chunkData);
+      await fs.unlink(chunkPath); // 删除已合并的分片
+
+      if ((i + 1) % 10 === 0) {
+        logger.info(`已合并 ${i + 1}/${totalChunks} 个分片`);
+      }
+    }
+
+    // 删除元数据文件和空目录
+    await fs.unlink(metaPath);
+    await fs.rmdir(fileDir);
+
+    logger.info(`临时分片文件已清理 - fileId: ${fileId}`);
+
+    // 计算文件MD5用于验证
+    const fileBuffer = await fs.readFile(finalPath);
+    const md5 = crypto.createHash("md5").update(fileBuffer).digest("hex");
+
+    logger.info(
+      `文件合并成功 - ${finalPath}, 大小: ${fileBuffer.length} bytes`,
+    );
+
+    return {
+      fileName: finalFileName,
+      originalName: meta.fileName,
+      filePath: `/uploads/files/${finalFileName}`,
+      fileSize: meta.fileSize,
+      md5,
+      actualSize: fileBuffer.length.toString(),
+    };
+  } catch (error) {
+    // 合并失败时,清理临时文件
+    logger.error(
+      `合并失败,开始清理临时文件 - fileId: ${fileId}, 错误: ${error}`,
+    );
+
+    try {
+      // 删除可能已创建的部分合并文件
+      if (finalPath) {
+        await fs.unlink(finalPath).catch(() => {
+          // 文件可能不存在,忽略错误
+        });
+      }
+
+      // 删除所有剩余的分片文件和元数据
+      const files = await fs.readdir(fileDir).catch(() => []);
+      for (const file of files) {
+        await fs.unlink(path.join(fileDir, file)).catch(() => {});
+      }
+      await fs.rmdir(fileDir).catch(() => {});
+
+      logger.info(`临时文件清理完成 - fileId: ${fileId}`);
+    } catch (cleanupError) {
+      logger.error(
+        `清理临时文件失败 - fileId: ${fileId}, 错误: ${cleanupError}`,
+      );
+    }
+
+    throw error;
   }
-
-  // 创建最终文件
-  const finalFileName = `${Date.now()}-${meta.fileName}`;
-  const finalPath = path.join(UPLOAD_DIR, finalFileName);
-
-  // 按顺序合并分片
-  for (let i = 0; i < parseInt(meta.totalChunks); i++) {
-    const chunkPath = path.join(fileDir, `chunk-${i}`);
-    const chunkData = await fs.readFile(chunkPath);
-    await fs.appendFile(finalPath, chunkData);
-    await fs.unlink(chunkPath); // 删除已合并的分片
-  }
-
-  // 删除元数据文件和空目录
-  await fs.unlink(metaPath);
-  await fs.rmdir(fileDir);
-
-  // 计算文件MD5用于验证
-  const fileBuffer = await fs.readFile(finalPath);
-  const md5 = crypto.createHash("md5").update(fileBuffer).digest("hex");
-
-  logger.info(`文件合并成功 - ${finalPath}`);
-
-  return {
-    fileName: finalFileName,
-    originalName: meta.fileName,
-    filePath: `/uploads/files/${finalFileName}`,
-    fileSize: meta.fileSize,
-    md5,
-  };
 }
 
 /**
@@ -223,11 +432,16 @@ router.post("/merge", async (req: any, res) => {
       return sendResponse(res, 400, "缺少fileId参数");
     }
 
-    const result = await mergeChunks(fileId);
+    logger.info(`收到合并请求 - fileId: ${fileId}`);
+
+    const result = await mergeChunksWithLock(fileId);
     sendResponse(res, 200, "文件合并成功", result);
   } catch (error) {
-    logger.error(`文件合并失败: ${error}`);
-    sendResponse(res, 500, "文件合并失败", error);
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    logger.error(
+      `文件合并失败 - fileId: ${req.body?.fileId}, 错误: ${errorMessage}`,
+    );
+    sendResponse(res, 500, "文件合并失败", { error: errorMessage });
   }
 });
 
@@ -351,7 +565,7 @@ router.get("/list", async (req, res) => {
         uploadTime: stats.birthtime,
       });
     }
-    sendResponse(res, 200, "查询成功" + basePath, [...fileList]);
+    sendResponse(res, 200, "查询成功", [...fileList]);
   } catch (error) {
     logger.error(`获取文件列表失败: ${error}`);
     sendResponse(res, 500, "获取文件列表失败", error);
